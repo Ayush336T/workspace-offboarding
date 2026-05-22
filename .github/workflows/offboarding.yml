@@ -1,0 +1,33 @@
+name: Workspace Offboarding
+
+on:
+  schedule:
+    # Runs daily at 2:00 AM UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  offboard:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run offboarding script
+        env:
+          GOOGLE_DOMAIN: ${{ secrets.GOOGLE_DOMAIN }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          BACKUP_FOLDER_ID: ${{ secrets.BACKUP_FOLDER_ID }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SUSPENSION_THRESHOLD_DAYS: "45"
+          DELETE_AFTER_BACKUP: "true"
+        run: python main.py

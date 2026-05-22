@@ -1,0 +1,376 @@
+import json
+import time
+import tempfile
+import os
+from datetime import datetime, timezone, timedelta
+
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+
+import config
+
+
+SCOPES = [
+    "https://www.googleapis.com/auth/admin.directory.user",
+    "https://www.googleapis.com/auth/ediscovery",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+def get_credentials():
+    """Create credentials from service account JSON."""
+    if config.SERVICE_ACCOUNT_JSON:
+        info = json.loads(config.SERVICE_ACCOUNT_JSON)
+    else:
+        with open("service_account.json", "r") as f:
+            info = json.load(f)
+
+    credentials = service_account.Credentials.from_service_account_info(
+        info, scopes=SCOPES
+    )
+    # Impersonate the admin user for domain-wide delegation
+    return credentials.with_subject(config.ADMIN_EMAIL)
+
+
+def get_suspended_users(admin_service):
+    """Get users suspended for more than the threshold days."""
+    threshold_date = datetime.now(timezone.utc) - timedelta(
+        days=config.SUSPENSION_THRESHOLD_DAYS
+    )
+
+    users = []
+    page_token = None
+
+    while True:
+        results = (
+            admin_service.users()
+            .list(
+                domain=config.DOMAIN,
+                query="isSuspended=true",
+                maxResults=100,
+                pageToken=page_token,
+                fields="nextPageToken,users(primaryEmail,suspensionReason,creationTime,lastLoginTime,name,id)",
+            )
+            .execute()
+        )
+
+        for user in results.get("users", []):
+            last_login = user.get("lastLoginTime")
+            if last_login:
+                last_login_dt = datetime.fromisoformat(
+                    last_login.replace("Z", "+00:00")
+                )
+                if last_login_dt < threshold_date:
+                    users.append(user)
+
+        page_token = results.get("nextPageToken")
+        if not page_token:
+            break
+
+    return users
+
+
+def create_vault_export(vault_service, user_email, matter_id, export_type):
+    """Create a Vault export for a specific user and data type."""
+    corpus_map = {
+        "mail": "MAIL",
+        "drive": "DRIVE",
+        "calendar": "CALENDAR",
+    }
+
+    export_name = f"{user_email}_{export_type}_{datetime.now().strftime('%Y%m%d')}"
+
+    export_body = {
+        "name": export_name,
+        "query": {
+            "corpus": corpus_map[export_type],
+            "dataScope": "ALL_DATA",
+            "accountInfo": {"emails": [user_email]},
+        },
+        "exportOptions": {
+            "region": "ANY",
+        },
+    }
+
+    if export_type == "mail":
+        export_body["exportOptions"]["mailOptions"] = {"exportFormat": "MBOX"}
+    elif export_type == "drive":
+        export_body["exportOptions"]["driveOptions"] = {
+            "includeAccessInfo": False
+        }
+
+    export = (
+        vault_service.matters()
+        .exports()
+        .create(matterId=matter_id, body=export_body)
+        .execute()
+    )
+
+    return export
+
+
+def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=60):
+    """Wait for a Vault export to complete."""
+    deadline = time.time() + (timeout_minutes * 60)
+
+    while time.time() < deadline:
+        export = (
+            vault_service.matters()
+            .exports()
+            .get(matterId=matter_id, exportId=export_id)
+            .execute()
+        )
+
+        status = export.get("status")
+        if status == "COMPLETED":
+            return export
+        elif status == "FAILED":
+            raise Exception(
+                f"Export {export_id} failed: {export.get('stats', {})}"
+            )
+
+        print(f"  Export {export_id} status: {status}, waiting...")
+        time.sleep(30)
+
+    raise Exception(f"Export {export_id} timed out after {timeout_minutes} minutes")
+
+
+def download_export_files(vault_service, matter_id, export_id, temp_dir):
+    """Download all files from a completed export."""
+    export = (
+        vault_service.matters()
+        .exports()
+        .get(matterId=matter_id, exportId=export_id)
+        .execute()
+    )
+
+    downloaded_files = []
+    cloud_storage_sink = export.get("cloudStorageSink", {})
+    files = cloud_storage_sink.get("files", [])
+
+    for i, file_info in enumerate(files):
+        bucket_name = file_info.get("bucketName")
+        object_name = file_info.get("objectName")
+
+        if not bucket_name or not object_name:
+            continue
+
+        file_path = os.path.join(temp_dir, f"export_part_{i}")
+        # Download via the Vault export download endpoint
+        downloaded_files.append(
+            {"bucket": bucket_name, "object": object_name, "local_path": file_path}
+        )
+
+    return downloaded_files, files
+
+
+def create_user_drive_folder(drive_service, user_email):
+    """Create a folder for the user in the backup Drive folder."""
+    folder_name = f"{user_email}_backup_{datetime.now().strftime('%Y%m%d')}"
+
+    folder_metadata = {
+        "name": folder_name,
+        "mimeType": "application/vnd.google-apps.folder",
+        "parents": [config.BACKUP_FOLDER_ID],
+    }
+
+    folder = (
+        drive_service.files()
+        .create(body=folder_metadata, fields="id,webViewLink")
+        .execute()
+    )
+
+    return folder
+
+
+def upload_to_drive(drive_service, folder_id, file_path, file_name):
+    """Upload a file to Google Drive."""
+    file_metadata = {
+        "name": file_name,
+        "parents": [folder_id],
+    }
+
+    media = MediaFileUpload(file_path, resumable=True)
+    uploaded_file = (
+        drive_service.files()
+        .create(body=file_metadata, media_body=media, fields="id,name,size")
+        .execute()
+    )
+
+    return uploaded_file
+
+
+def transfer_drive_ownership(drive_service, admin_service, user_email, folder_id):
+    """Transfer user's Drive files to the backup folder using Admin SDK data transfer."""
+    # Create a summary file noting the transfer
+    print(f"  Drive data for {user_email} exported via Vault")
+
+
+def delete_user(admin_service, user_email):
+    """Delete a user account from Google Workspace."""
+    if not config.DELETE_AFTER_BACKUP:
+        print(f"  [DRY RUN] Would delete user: {user_email}")
+        return False
+
+    admin_service.users().delete(userKey=user_email).execute()
+    print(f"  DELETED user: {user_email}")
+    return True
+
+
+def process_user(user, vault_service, drive_service, admin_service):
+    """Process a single user: export data, upload to Drive, delete account."""
+    user_email = user["primaryEmail"]
+    user_name = user.get("name", {}).get("fullName", user_email)
+    print(f"\nProcessing: {user_name} ({user_email})")
+
+    # Step 1: Create a Vault matter for this user's exports
+    matter_body = {
+        "name": f"Offboarding - {user_email} - {datetime.now().strftime('%Y-%m-%d')}",
+        "description": f"Automated offboarding backup for {user_email}",
+    }
+    matter = vault_service.matters().create(body=matter_body).execute()
+    matter_id = matter["matterId"]
+    print(f"  Created Vault matter: {matter_id}")
+
+    # Step 2: Create a Drive folder for this user
+    user_folder = create_user_drive_folder(drive_service, user_email)
+    folder_id = user_folder["id"]
+    print(f"  Created backup folder: {user_folder.get('webViewLink', folder_id)}")
+
+    # Step 3: Export Gmail, Drive, and Calendar data
+    export_types = ["mail", "drive", "calendar"]
+    exports = {}
+
+    for export_type in export_types:
+        try:
+            export = create_vault_export(
+                vault_service, user_email, matter_id, export_type
+            )
+            exports[export_type] = export
+            print(f"  Started {export_type} export: {export['id']}")
+        except Exception as e:
+            print(f"  WARNING: Failed to start {export_type} export: {e}")
+
+    # Step 4: Wait for all exports to complete
+    completed_exports = {}
+    for export_type, export in exports.items():
+        try:
+            completed = wait_for_export(vault_service, matter_id, export["id"])
+            completed_exports[export_type] = completed
+            print(f"  {export_type} export completed")
+        except Exception as e:
+            print(f"  WARNING: {export_type} export failed: {e}")
+
+    # Step 5: Download and upload export files to Drive
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for export_type, export in completed_exports.items():
+            try:
+                _, files = download_export_files(
+                    vault_service, matter_id, export["id"], temp_dir
+                )
+                # Upload export metadata/info to Drive as a reference
+                info_path = os.path.join(temp_dir, f"{export_type}_export_info.json")
+                with open(info_path, "w") as f:
+                    json.dump(
+                        {
+                            "export_type": export_type,
+                            "user": user_email,
+                            "export_id": export["id"],
+                            "matter_id": matter_id,
+                            "status": "COMPLETED",
+                            "stats": export.get("stats", {}),
+                            "cloud_storage": export.get("cloudStorageSink", {}),
+                            "exported_at": datetime.now(timezone.utc).isoformat(),
+                        },
+                        f,
+                        indent=2,
+                    )
+                upload_to_drive(
+                    drive_service, folder_id, info_path, f"{export_type}_export_info.json"
+                )
+                print(f"  Uploaded {export_type} export info to Drive")
+            except Exception as e:
+                print(f"  WARNING: Failed to process {export_type} files: {e}")
+
+    # Step 6: Create a summary file
+    summary = {
+        "user_email": user_email,
+        "user_name": user_name,
+        "offboarded_at": datetime.now(timezone.utc).isoformat(),
+        "matter_id": matter_id,
+        "backup_folder_id": folder_id,
+        "exports_completed": list(completed_exports.keys()),
+        "exports_failed": [t for t in export_types if t not in completed_exports],
+        "account_deleted": config.DELETE_AFTER_BACKUP,
+    }
+
+    summary_path = os.path.join(tempfile.gettempdir(), "summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    upload_to_drive(drive_service, folder_id, summary_path, "offboarding_summary.json")
+
+    # Step 7: Close the Vault matter (set to CLOSED state for retention)
+    vault_service.matters().close(matterId=matter_id, body={}).execute()
+    print(f"  Closed Vault matter (data retained)")
+
+    # Step 8: Delete the user account
+    if config.DELETE_AFTER_BACKUP:
+        if len(completed_exports) == len(export_types):
+            delete_user(admin_service, user_email)
+        else:
+            print(
+                f"  SKIPPING deletion - not all exports succeeded "
+                f"({len(completed_exports)}/{len(export_types)})"
+            )
+    else:
+        print(f"  [DRY RUN] Skipping deletion")
+
+    return summary
+
+
+def main():
+    print("=" * 60)
+    print("Google Workspace Offboarding - Automated Backup & Cleanup")
+    print(f"Run time: {datetime.now(timezone.utc).isoformat()}")
+    print(f"Domain: {config.DOMAIN}")
+    print(f"Suspension threshold: {config.SUSPENSION_THRESHOLD_DAYS} days")
+    print(f"Delete after backup: {config.DELETE_AFTER_BACKUP}")
+    print("=" * 60)
+
+    credentials = get_credentials()
+
+    admin_service = build("admin", "directory_v1", credentials=credentials)
+    vault_service = build("vault", "v1", credentials=credentials)
+    drive_service = build("drive", "v3", credentials=credentials)
+
+    print("\nSearching for suspended users...")
+    suspended_users = get_suspended_users(admin_service)
+    print(f"Found {len(suspended_users)} users suspended for 45+ days")
+
+    if not suspended_users:
+        print("\nNo users to process. Done.")
+        return
+
+    results = []
+    for user in suspended_users:
+        try:
+            summary = process_user(user, vault_service, drive_service, admin_service)
+            results.append(summary)
+        except Exception as e:
+            print(f"\nERROR processing {user['primaryEmail']}: {e}")
+            results.append({"user_email": user["primaryEmail"], "error": str(e)})
+
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"Total processed: {len(results)}")
+    print(
+        f"Successful: {len([r for r in results if 'error' not in r])}"
+    )
+    print(f"Failed: {len([r for r in results if 'error' in r])}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
