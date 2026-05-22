@@ -30,56 +30,46 @@ def get_credentials():
 
 
 def get_direct_reports(admin_service, manager_email):
-    """Get all direct reports of a manager by checking the relations field."""
+    """Get all direct reports of a manager by scanning users and checking relations."""
     reports = []
     page_token = None
+    debug_printed = False
 
     while True:
         results = (
             admin_service.users()
             .list(
                 domain=config.DOMAIN,
-                query=f"directManager={manager_email}",
-                maxResults=200,
+                maxResults=500,
                 pageToken=page_token,
-                fields="nextPageToken,users(primaryEmail,name,relations)",
+                projection="full",
             )
             .execute()
         )
 
         for user in results.get("users", []):
-            reports.append(user)
+            # Print first user's full structure for debugging
+            if not debug_printed:
+                print(f"  DEBUG - Sample user fields: {list(user.keys())}")
+                relations = user.get("relations", [])
+                if relations:
+                    print(f"  DEBUG - Sample relations: {relations}")
+                debug_printed = True
+
+            # Check relations field for manager
+            relations = user.get("relations", [])
+            for rel in relations:
+                rel_value = rel.get("value", "").lower()
+                if rel.get("type") == "manager" and (
+                    rel_value == manager_email.lower()
+                    or manager_email.lower().split("@")[0] in rel_value
+                ):
+                    reports.append(user)
+                    break
 
         page_token = results.get("nextPageToken")
         if not page_token:
             break
-
-    # If directManager query didn't work, fall back to scanning all users
-    if not reports:
-        print("  directManager query returned 0, trying full scan...")
-        page_token = None
-        while True:
-            results = (
-                admin_service.users()
-                .list(
-                    domain=config.DOMAIN,
-                    maxResults=500,
-                    pageToken=page_token,
-                    fields="nextPageToken,users(primaryEmail,name,relations)",
-                )
-                .execute()
-            )
-
-            for user in results.get("users", []):
-                relations = user.get("relations", [])
-                for rel in relations:
-                    if rel.get("type") == "manager" and rel.get("value", "").lower() == manager_email.lower():
-                        reports.append(user)
-                        break
-
-            page_token = results.get("nextPageToken")
-            if not page_token:
-                break
 
     return reports
 
