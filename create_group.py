@@ -29,11 +29,25 @@ def get_credentials():
     return credentials.with_subject(config.ADMIN_EMAIL)
 
 
+def get_manager_name(admin_service, manager_email):
+    """Get the manager's display name to match against relations field."""
+    manager = admin_service.users().get(userKey=manager_email, projection="full").execute()
+    full_name = manager.get("name", {}).get("fullName", "")
+    family_name = manager.get("name", {}).get("familyName", "")
+    given_name = manager.get("name", {}).get("givenName", "")
+    # Relations field typically stores as "LastName, FirstName"
+    last_first = f"{family_name}, {given_name}"
+    print(f"  Manager name variants: '{full_name}', '{last_first}'")
+    return full_name, last_first
+
+
 def get_direct_reports(admin_service, manager_email):
     """Get all direct reports of a manager by scanning users and checking relations."""
+    full_name, last_first = get_manager_name(admin_service, manager_email)
+    match_values = [v.lower() for v in [full_name, last_first, manager_email] if v]
+
     reports = []
     page_token = None
-    debug_printed = False
 
     while True:
         results = (
@@ -48,24 +62,13 @@ def get_direct_reports(admin_service, manager_email):
         )
 
         for user in results.get("users", []):
-            # Print first user's full structure for debugging
-            if not debug_printed:
-                print(f"  DEBUG - Sample user fields: {list(user.keys())}")
-                relations = user.get("relations", [])
-                if relations:
-                    print(f"  DEBUG - Sample relations: {relations}")
-                debug_printed = True
-
-            # Check relations field for manager
             relations = user.get("relations", [])
             for rel in relations:
-                rel_value = rel.get("value", "").lower()
-                if rel.get("type") == "manager" and (
-                    rel_value == manager_email.lower()
-                    or manager_email.lower().split("@")[0] in rel_value
-                ):
-                    reports.append(user)
-                    break
+                if rel.get("type") == "manager":
+                    rel_value = rel.get("value", "").lower()
+                    if rel_value in match_values or any(m in rel_value for m in match_values):
+                        reports.append(user)
+                        break
 
         page_token = results.get("nextPageToken")
         if not page_token:
