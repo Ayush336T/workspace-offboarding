@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from google.cloud import storage as gcs
 
 import config
 
@@ -185,8 +186,8 @@ def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=60):
     raise Exception(f"Export {export_id} timed out after {timeout_minutes} minutes")
 
 
-def download_export_files(vault_service, matter_id, export_id, temp_dir):
-    """Download all files from a completed export."""
+def download_export_files(vault_service, matter_id, export_id, temp_dir, credentials):
+    """Download all files from a completed Vault export via Cloud Storage."""
     export = (
         vault_service.matters()
         .exports()
@@ -198,6 +199,8 @@ def download_export_files(vault_service, matter_id, export_id, temp_dir):
     cloud_storage_sink = export.get("cloudStorageSink", {})
     files = cloud_storage_sink.get("files", [])
 
+    gcs_client = gcs.Client(credentials=credentials)
+
     for i, file_info in enumerate(files):
         bucket_name = file_info.get("bucketName")
         object_name = file_info.get("objectName")
@@ -205,13 +208,19 @@ def download_export_files(vault_service, matter_id, export_id, temp_dir):
         if not bucket_name or not object_name:
             continue
 
-        file_path = os.path.join(temp_dir, f"export_part_{i}")
-        # Download via the Vault export download endpoint
-        downloaded_files.append(
-            {"bucket": bucket_name, "object": object_name, "local_path": file_path}
-        )
+        file_name = os.path.basename(object_name)
+        local_path = os.path.join(temp_dir, file_name or f"export_part_{i}")
 
-    return downloaded_files, files
+        bucket = gcs_client.bucket(bucket_name)
+        blob = bucket.blob(object_name)
+        blob.download_to_filename(local_path)
+
+        downloaded_files.append(
+            {"bucket": bucket_name, "object": object_name, "local_path": local_path, "file_name": file_name}
+        )
+        print(f"    Downloaded: {file_name} ({os.path.getsize(local_path)} bytes)")
+
+    return downloaded_files
 
 
 def create_user_drive_folder(drive_service, user_email):
@@ -329,14 +338,20 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
         except Exception as e:
             print(f"  WARNING: {export_type} export failed: {e}")
 
-    # Step 5: Download and upload export files to Drive
+    # Step 5: Download export files from Vault Cloud Storage and upload to Drive
+    credentials = get_credentials()
     with tempfile.TemporaryDirectory() as temp_dir:
         for export_type, export in completed_exports.items():
             try:
-                _, files = download_export_files(
-                    vault_service, matter_id, export["id"], temp_dir
+                downloaded_files = download_export_files(
+                    vault_service, matter_id, export["id"], temp_dir, credentials
                 )
-                # Upload export metadata/info to Drive as a reference
+                for file_info in downloaded_files:
+                    upload_to_drive(
+                        drive_service, folder_id, file_info["local_path"], file_info["file_name"]
+                    )
+                    print(f"  Uploaded {file_info['file_name']} to Drive")
+
                 info_path = os.path.join(temp_dir, f"{export_type}_export_info.json")
                 with open(info_path, "w") as f:
                     json.dump(
@@ -347,7 +362,7 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
                             "matter_id": matter_id,
                             "status": "COMPLETED",
                             "stats": export.get("stats", {}),
-                            "cloud_storage": export.get("cloudStorageSink", {}),
+                            "files_exported": len(downloaded_files),
                             "exported_at": datetime.now(timezone.utc).isoformat(),
                         },
                         f,
