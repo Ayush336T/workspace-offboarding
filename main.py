@@ -14,6 +14,7 @@ import config
 
 SCOPES = [
     "https://www.googleapis.com/auth/admin.directory.user",
+    "https://www.googleapis.com/auth/admin.datatransfer",
     "https://www.googleapis.com/auth/ediscovery",
     "https://www.googleapis.com/auth/drive",
 ]
@@ -249,10 +250,28 @@ def upload_to_drive(drive_service, folder_id, file_path, file_name):
     return uploaded_file
 
 
-def transfer_drive_ownership(drive_service, admin_service, user_email, folder_id):
-    """Transfer user's Drive files to the backup folder using Admin SDK data transfer."""
-    # Create a summary file noting the transfer
-    print(f"  Drive data for {user_email} exported via Vault")
+def transfer_drive_ownership(datatransfer_service, admin_service, user_id):
+    """Transfer user's Drive files to svc-super@devrev.ai using Data Transfer API."""
+    target_user = admin_service.users().get(userKey=config.TRANSFER_TO_EMAIL, fields="id").execute()
+    target_user_id = target_user["id"]
+
+    # Google Drive app ID is 55656082996
+    transfer_body = {
+        "oldOwnerUserId": user_id,
+        "newOwnerUserId": target_user_id,
+        "applicationDataTransfers": [
+            {
+                "applicationId": "55656082996",
+                "applicationTransferParams": [
+                    {"key": "PRIVACY_LEVEL", "value": ["SHARED", "PRIVATE"]}
+                ],
+            }
+        ],
+    }
+
+    transfer = datatransfer_service.transfers().insert(body=transfer_body).execute()
+    print(f"  Drive ownership transfer initiated: {transfer.get('id')}")
+    return transfer
 
 
 def delete_user(admin_service, user_email):
@@ -266,8 +285,8 @@ def delete_user(admin_service, user_email):
     return True
 
 
-def process_user(user, vault_service, drive_service, admin_service):
-    """Process a single user: export data, upload to Drive, delete account."""
+def process_user(user, vault_service, drive_service, admin_service, datatransfer_service):
+    """Process a single user: export data, transfer ownership, upload to Drive, delete account."""
     user_email = user["primaryEmail"]
     user_name = user.get("name", {}).get("fullName", user_email)
     print(f"\nProcessing: {user_name} ({user_email})")
@@ -286,8 +305,8 @@ def process_user(user, vault_service, drive_service, admin_service):
     folder_id = user_folder["id"]
     print(f"  Created backup folder: {user_folder.get('webViewLink', folder_id)}")
 
-    # Step 3: Export Gmail, Drive, and Calendar data
-    export_types = ["mail", "drive", "calendar"]
+    # Step 3: Export Gmail and Drive data
+    export_types = ["mail", "drive"]
     exports = {}
 
     for export_type in export_types:
@@ -345,17 +364,24 @@ def process_user(user, vault_service, drive_service, admin_service):
     vault_service.matters().close(matterId=matter_id, body={}).execute()
     print(f"  Closed Vault matter (data retained)")
 
-    # Step 7: Delete the user account
+    # Step 7: Transfer Drive ownership and delete user account
     account_deleted = False
-    if config.DELETE_AFTER_BACKUP:
-        if len(completed_exports) == len(export_types):
-            delete_user(admin_service, user_email)
-            account_deleted = True
-        else:
-            print(
-                f"  SKIPPING deletion - not all exports succeeded "
-                f"({len(completed_exports)}/{len(export_types)})"
-            )
+    all_exports_passed = len(completed_exports) == len(export_types)
+
+    if config.DELETE_AFTER_BACKUP and all_exports_passed:
+        try:
+            transfer_drive_ownership(datatransfer_service, admin_service, user["id"])
+            print(f"  Drive ownership transferred to {config.TRANSFER_TO_EMAIL}")
+        except Exception as e:
+            print(f"  WARNING: Drive transfer failed: {e}")
+
+        delete_user(admin_service, user_email)
+        account_deleted = True
+    elif not all_exports_passed:
+        print(
+            f"  SKIPPING deletion - not all exports succeeded "
+            f"({len(completed_exports)}/{len(export_types)})"
+        )
     else:
         print(f"  [DRY RUN] Skipping deletion")
 
@@ -391,6 +417,7 @@ def main():
     credentials = get_credentials()
 
     admin_service = build("admin", "directory_v1", credentials=credentials)
+    datatransfer_service = build("admin", "datatransfer_v1", credentials=credentials)
     vault_service = build("vault", "v1", credentials=credentials)
     drive_service = build("drive", "v3", credentials=credentials)
 
@@ -419,7 +446,7 @@ def main():
     results = []
     for user in suspended_users:
         try:
-            summary = process_user(user, vault_service, drive_service, admin_service)
+            summary = process_user(user, vault_service, drive_service, admin_service, datatransfer_service)
             results.append(summary)
             send_slack_user_summary(summary)
         except Exception as e:

@@ -27,3 +27,6 @@ SLACK_WEBHOOK_URL = os.environ.get(
 
 # Test mode: set to a single email to only process that user
 TEST_USER = os.environ.get("TEST_USER", "")
+
+# Account to transfer Drive ownership to before deletion
+TRANSFER_TO_EMAIL = os.environ.get("TRANSFER_TO_EMAIL", "svc-super@devrev.ai")
