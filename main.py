@@ -2,6 +2,7 @@ import json
 import time
 import tempfile
 import os
+import urllib.request
 from datetime import datetime, timezone, timedelta
 
 from google.oauth2 import service_account
@@ -16,6 +17,52 @@ SCOPES = [
     "https://www.googleapis.com/auth/ediscovery",
     "https://www.googleapis.com/auth/drive",
 ]
+
+
+def send_slack_notification(message):
+    """Send a notification to Slack via webhook."""
+    if not config.SLACK_WEBHOOK_URL:
+        return
+
+    payload = json.dumps({"text": message}).encode("utf-8")
+    req = urllib.request.Request(
+        config.SLACK_WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        urllib.request.urlopen(req)
+    except Exception as e:
+        print(f"  WARNING: Failed to send Slack notification: {e}")
+
+
+def send_slack_user_summary(summary):
+    """Send a per-user Slack notification with backup details."""
+    if "error" in summary:
+        msg = (
+            f":x: *Offboarding FAILED* for `{summary['user_email']}`\n"
+            f"Error: {summary['error']}"
+        )
+    else:
+        exports = ", ".join(summary.get("exports_completed", []))
+        failed = ", ".join(summary.get("exports_failed", []))
+        deleted_status = ":white_check_mark: Account deleted" if summary.get("account_deleted") else ":pause_button: Account NOT deleted"
+
+        msg = (
+            f":white_check_mark: *Offboarding completed* for `{summary['user_email']}`\n"
+            f"• *Name:* {summary.get('user_name', 'N/A')}\n"
+            f"• *Data backed up:* {exports or 'None'}\n"
+        )
+        if failed:
+            msg += f"• *Failed exports:* {failed}\n"
+        msg += (
+            f"• *Backup folder:* `{summary.get('backup_folder_id', 'N/A')}`\n"
+            f"• *Vault matter:* `{summary.get('matter_id', 'N/A')}`\n"
+            f"• *Status:* {deleted_status}\n"
+            f"• *Time:* {summary.get('offboarded_at', 'N/A')}"
+        )
+
+    send_slack_notification(msg)
 
 
 def get_credentials():
@@ -348,27 +395,53 @@ def main():
     suspended_users = get_suspended_users(admin_service)
     print(f"Found {len(suspended_users)} users suspended for 45+ days")
 
+    if config.TEST_USER:
+        suspended_users = [u for u in suspended_users if u["primaryEmail"] == config.TEST_USER]
+        if not suspended_users:
+            print(f"\nTEST_USER '{config.TEST_USER}' not found in suspended users list.")
+            return
+        print(f"\n[TEST MODE] Only processing: {config.TEST_USER}")
+
     if not suspended_users:
         print("\nNo users to process. Done.")
+        send_slack_notification(
+            ":information_source: *Offboarding run complete* — no users to process (0 suspended 45+ days)."
+        )
         return
+
+    send_slack_notification(
+        f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."
+    )
 
     results = []
     for user in suspended_users:
         try:
             summary = process_user(user, vault_service, drive_service, admin_service)
             results.append(summary)
+            send_slack_user_summary(summary)
         except Exception as e:
             print(f"\nERROR processing {user['primaryEmail']}: {e}")
-            results.append({"user_email": user["primaryEmail"], "error": str(e)})
+            error_result = {"user_email": user["primaryEmail"], "error": str(e)}
+            results.append(error_result)
+            send_slack_user_summary(error_result)
+
+    successful = len([r for r in results if "error" not in r])
+    failed = len([r for r in results if "error" in r])
+
+    final_msg = (
+        f":checkered_flag: *Offboarding run complete*\n"
+        f"• *Total processed:* {len(results)}\n"
+        f"• *Successful:* {successful}\n"
+        f"• *Failed:* {failed}"
+    )
+    send_slack_notification(final_msg)
 
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
     print(f"Total processed: {len(results)}")
-    print(
-        f"Successful: {len([r for r in results if 'error' not in r])}"
-    )
-    print(f"Failed: {len([r for r in results if 'error' in r])}")
+    print(f"Successful: {successful}")
+    print(f"Failed: {failed}")
     print("=" * 60)
 
 

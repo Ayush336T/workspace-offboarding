@@ -18,3 +18,12 @@ DELETE_AFTER_BACKUP = os.environ.get("DELETE_AFTER_BACKUP", "true").lower() == "
 
 # Service account credentials JSON (passed as env var in GitHub Actions)
 SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON", "")
+
+# Slack webhook for notifications
+SLACK_WEBHOOK_URL = os.environ.get(
+    "SLACK_WEBHOOK_URL",
+    "https://hooks.slack.com/services/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",
+)
+
+# Test mode: set to a single email to only process that user
+TEST_USER = os.environ.get("TEST_USER", "")
