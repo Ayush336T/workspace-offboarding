@@ -341,7 +341,25 @@ def process_user(user, vault_service, drive_service, admin_service):
             except Exception as e:
                 print(f"  WARNING: Failed to process {export_type} files: {e}")
 
-    # Step 6: Create a summary file
+    # Step 6: Close the Vault matter (set to CLOSED state for retention)
+    vault_service.matters().close(matterId=matter_id, body={}).execute()
+    print(f"  Closed Vault matter (data retained)")
+
+    # Step 7: Delete the user account
+    account_deleted = False
+    if config.DELETE_AFTER_BACKUP:
+        if len(completed_exports) == len(export_types):
+            delete_user(admin_service, user_email)
+            account_deleted = True
+        else:
+            print(
+                f"  SKIPPING deletion - not all exports succeeded "
+                f"({len(completed_exports)}/{len(export_types)})"
+            )
+    else:
+        print(f"  [DRY RUN] Skipping deletion")
+
+    # Step 8: Create a summary file
     summary = {
         "user_email": user_email,
         "user_name": user_name,
@@ -350,29 +368,13 @@ def process_user(user, vault_service, drive_service, admin_service):
         "backup_folder_id": folder_id,
         "exports_completed": list(completed_exports.keys()),
         "exports_failed": [t for t in export_types if t not in completed_exports],
-        "account_deleted": config.DELETE_AFTER_BACKUP,
+        "account_deleted": account_deleted,
     }
 
     summary_path = os.path.join(tempfile.gettempdir(), "summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     upload_to_drive(drive_service, folder_id, summary_path, "offboarding_summary.json")
-
-    # Step 7: Close the Vault matter (set to CLOSED state for retention)
-    vault_service.matters().close(matterId=matter_id, body={}).execute()
-    print(f"  Closed Vault matter (data retained)")
-
-    # Step 8: Delete the user account
-    if config.DELETE_AFTER_BACKUP:
-        if len(completed_exports) == len(export_types):
-            delete_user(admin_service, user_email)
-        else:
-            print(
-                f"  SKIPPING deletion - not all exports succeeded "
-                f"({len(completed_exports)}/{len(export_types)})"
-            )
-    else:
-        print(f"  [DRY RUN] Skipping deletion")
 
     return summary
 
