@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -136,6 +137,10 @@ def main():
     # Create group
     print(f"\nCreating group {GROUP_EMAIL}...")
     create_group(admin_service, GROUP_EMAIL, GROUP_NAME)
+
+    # Wait for group to propagate
+    print("Waiting 10s for group to propagate...")
+    time.sleep(10)
 
     # Add members
     print(f"\nAdding members to {GROUP_EMAIL}...")
