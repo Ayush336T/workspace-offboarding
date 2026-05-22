@@ -1,0 +1,43 @@
+name: Create Google Group
+
+on:
+  workflow_dispatch:
+    inputs:
+      manager_email:
+        description: "Manager email to get direct reports from"
+        required: true
+        default: "adnan.bhutta@devrev.ai"
+      group_email:
+        description: "Group email to create"
+        required: true
+        default: "Partnership@devrev.ai"
+      group_name:
+        description: "Group display name"
+        required: true
+        default: "Partnership"
+
+jobs:
+  create-group:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create group and add members
+        env:
+          GOOGLE_DOMAIN: ${{ secrets.GOOGLE_DOMAIN }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          MANAGER_EMAIL: ${{ github.event.inputs.manager_email }}
+          GROUP_EMAIL: ${{ github.event.inputs.group_email }}
+          GROUP_NAME: ${{ github.event.inputs.group_name }}
+        run: python create_group.py
