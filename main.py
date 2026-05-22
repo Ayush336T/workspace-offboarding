@@ -133,6 +133,7 @@ def create_vault_export(vault_service, user_email, matter_id, export_type):
         "query": {
             "corpus": corpus_map[export_type],
             "dataScope": "ALL_DATA",
+            "searchMethod": "ACCOUNT",
             "accountInfo": {"emails": [user_email]},
         },
         "exportOptions": {
