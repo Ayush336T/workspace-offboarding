@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
 from google.cloud import storage as gcs
 
 import config
@@ -187,8 +187,102 @@ def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=60):
     raise Exception(f"Export {export_id} timed out after {timeout_minutes} minutes")
 
 
-def download_export_files(vault_service, matter_id, export_id, temp_dir, credentials):
-    """Download all files from a completed Vault export via Cloud Storage."""
+def stream_gcs_to_drive(gcs_client, drive_service, bucket_name, object_name, folder_id, file_name):
+    """Stream a file from GCS directly to Drive using resumable upload with retries."""
+    import io
+    import ssl
+
+    CHUNK_SIZE = 50 * 1024 * 1024  # 50MB chunks
+
+    bucket = gcs_client.bucket(bucket_name)
+    blob = bucket.blob(object_name)
+    blob.reload()
+    file_size = blob.size
+
+    print(f"    Streaming {file_name} ({file_size} bytes) from GCS to Drive...")
+
+    file_metadata = {"name": file_name, "parents": [folder_id]}
+
+    # Initiate resumable upload
+    media = MediaIoBaseUpload(
+        io.BytesIO(b""),  # placeholder, we'll use raw resumable
+        mimetype="application/octet-stream",
+        resumable=True,
+    )
+
+    # For small files (<50MB), download and upload directly
+    if file_size < CHUNK_SIZE:
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                content = blob.download_as_bytes()
+                media = MediaIoBaseUpload(
+                    io.BytesIO(content),
+                    mimetype="application/octet-stream",
+                    resumable=True,
+                    chunksize=CHUNK_SIZE,
+                )
+                uploaded = drive_service.files().create(
+                    body=file_metadata, media_body=media, fields="id,name,size"
+                ).execute()
+                print(f"    Uploaded {file_name} to Drive ({uploaded.get('size')} bytes)")
+                return uploaded
+            except (ssl.SSLError, Exception) as e:
+                if attempt < max_retries - 1:
+                    print(f"    Retry {attempt + 1}/{max_retries} for {file_name}: {e}")
+                    time.sleep(5 * (attempt + 1))
+                else:
+                    raise
+
+    # For large files, stream in chunks using a temporary pipe approach
+    # Download from GCS in chunks, upload to Drive via resumable upload
+    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file_name}") as tmp:
+        tmp_path = tmp.name
+
+    try:
+        # Download with retries
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                blob.download_to_filename(tmp_path)
+                break
+            except (ssl.SSLError, Exception) as e:
+                if attempt < max_retries - 1:
+                    print(f"    GCS download retry {attempt + 1}/{max_retries}: {e}")
+                    time.sleep(5 * (attempt + 1))
+                else:
+                    raise
+
+        # Upload with retries and chunking
+        media = MediaFileUpload(tmp_path, resumable=True, chunksize=CHUNK_SIZE)
+        request = drive_service.files().create(
+            body=file_metadata, media_body=media, fields="id,name,size"
+        )
+
+        response = None
+        while response is None:
+            for attempt in range(max_retries):
+                try:
+                    status, response = request.next_chunk()
+                    if status:
+                        print(f"    Upload progress: {int(status.progress() * 100)}%")
+                    break
+                except (ssl.SSLError, Exception) as e:
+                    if attempt < max_retries - 1:
+                        print(f"    Upload chunk retry {attempt + 1}/{max_retries}: {e}")
+                        time.sleep(5 * (attempt + 1))
+                    else:
+                        raise
+
+        print(f"    Uploaded {file_name} to Drive ({response.get('size')} bytes)")
+        return response
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
+def process_export_files(vault_service, drive_service, matter_id, export_id, folder_id, credentials):
+    """Download export files from Vault GCS and upload to Drive with streaming."""
     export = (
         vault_service.matters()
         .exports()
@@ -196,12 +290,11 @@ def download_export_files(vault_service, matter_id, export_id, temp_dir, credent
         .execute()
     )
 
-    downloaded_files = []
     cloud_storage_sink = export.get("cloudStorageSink", {})
     files = cloud_storage_sink.get("files", [])
-
     gcs_client = gcs.Client(credentials=credentials)
 
+    uploaded_files = []
     for i, file_info in enumerate(files):
         bucket_name = file_info.get("bucketName")
         object_name = file_info.get("objectName")
@@ -209,19 +302,13 @@ def download_export_files(vault_service, matter_id, export_id, temp_dir, credent
         if not bucket_name or not object_name:
             continue
 
-        file_name = os.path.basename(object_name)
-        local_path = os.path.join(temp_dir, file_name or f"export_part_{i}")
-
-        bucket = gcs_client.bucket(bucket_name)
-        blob = bucket.blob(object_name)
-        blob.download_to_filename(local_path)
-
-        downloaded_files.append(
-            {"bucket": bucket_name, "object": object_name, "local_path": local_path, "file_name": file_name}
+        file_name = os.path.basename(object_name) or f"export_part_{i}"
+        result = stream_gcs_to_drive(
+            gcs_client, drive_service, bucket_name, object_name, folder_id, file_name
         )
-        print(f"    Downloaded: {file_name} ({os.path.getsize(local_path)} bytes)")
+        uploaded_files.append({"file_name": file_name, "drive_id": result.get("id")})
 
-    return downloaded_files
+    return uploaded_files
 
 
 def create_user_drive_folder(drive_service, user_email):
@@ -339,50 +426,43 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
         except Exception as e:
             print(f"  WARNING: {export_type} export failed: {e}")
 
-    # Step 5: Download export files from Vault Cloud Storage and upload to Drive
+    # Step 5: Stream export files from Vault Cloud Storage directly to Drive
     credentials = get_credentials()
     uploaded_exports = []
     failed_uploads = []
-    with tempfile.TemporaryDirectory() as temp_dir:
-        for export_type, export in completed_exports.items():
-            try:
-                downloaded_files = download_export_files(
-                    vault_service, matter_id, export["id"], temp_dir, credentials
+    for export_type, export in completed_exports.items():
+        try:
+            uploaded_files = process_export_files(
+                vault_service, drive_service, matter_id, export["id"], folder_id, credentials
+            )
+            if not uploaded_files:
+                raise Exception("No files transferred from Cloud Storage to Drive")
+
+            uploaded_exports.append(export_type)
+
+            # Upload metadata as reference
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                json.dump(
+                    {
+                        "export_type": export_type,
+                        "user": user_email,
+                        "export_id": export["id"],
+                        "matter_id": matter_id,
+                        "status": "COMPLETED",
+                        "stats": export.get("stats", {}),
+                        "files_exported": len(uploaded_files),
+                        "exported_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                    f,
+                    indent=2,
                 )
-                if not downloaded_files:
-                    raise Exception("No files returned from Cloud Storage")
-
-                for file_info in downloaded_files:
-                    upload_to_drive(
-                        drive_service, folder_id, file_info["local_path"], file_info["file_name"]
-                    )
-                    print(f"  Uploaded {file_info['file_name']} to Drive")
-
-                uploaded_exports.append(export_type)
-
-                info_path = os.path.join(temp_dir, f"{export_type}_export_info.json")
-                with open(info_path, "w") as f:
-                    json.dump(
-                        {
-                            "export_type": export_type,
-                            "user": user_email,
-                            "export_id": export["id"],
-                            "matter_id": matter_id,
-                            "status": "COMPLETED",
-                            "stats": export.get("stats", {}),
-                            "files_exported": len(downloaded_files),
-                            "exported_at": datetime.now(timezone.utc).isoformat(),
-                        },
-                        f,
-                        indent=2,
-                    )
-                upload_to_drive(
-                    drive_service, folder_id, info_path, f"{export_type}_export_info.json"
-                )
-                print(f"  Uploaded {export_type} export info to Drive")
-            except Exception as e:
-                print(f"  WARNING: Failed to download/upload {export_type} files: {e}")
-                failed_uploads.append(export_type)
+                info_path = f.name
+            upload_to_drive(drive_service, folder_id, info_path, f"{export_type}_export_info.json")
+            os.unlink(info_path)
+            print(f"  Uploaded {export_type} export info to Drive")
+        except Exception as e:
+            print(f"  WARNING: Failed to transfer {export_type} files: {e}")
+            failed_uploads.append(export_type)
 
     # Step 6: Close the Vault matter (set to CLOSED state for retention)
     vault_service.matters().close(matterId=matter_id, body={}).execute()
