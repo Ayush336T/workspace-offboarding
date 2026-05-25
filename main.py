@@ -161,8 +161,10 @@ def create_vault_export(vault_service, user_email, matter_id, export_type):
     return export
 
 
-def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=60):
+def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=None):
     """Wait for a Vault export to complete."""
+    if timeout_minutes is None:
+        timeout_minutes = config.EXPORT_TIMEOUT_MINUTES
     deadline = time.time() + (timeout_minutes * 60)
 
     while time.time() < deadline:
@@ -561,6 +563,12 @@ def main():
             ":information_source: *Offboarding run complete* — no users to process (0 suspended 45+ days)."
         )
         return
+
+    # Apply batch limit
+    total_users = len(suspended_users)
+    if config.BATCH_SIZE > 0 and not config.TEST_USER:
+        suspended_users = suspended_users[:config.BATCH_SIZE]
+        print(f"Batch size: {config.BATCH_SIZE} (processing {len(suspended_users)} of {total_users})")
 
     send_slack_notification(
         f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."

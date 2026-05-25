@@ -30,3 +30,9 @@ TEST_USER = os.environ.get("TEST_USER", "")
 
 # Account to transfer Drive ownership to before deletion
 TRANSFER_TO_EMAIL = os.environ.get("TRANSFER_TO_EMAIL", "svc-super@devrev.ai")
+
+# Max users to process per run (0 = no limit)
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
+
+# Vault export timeout in minutes
+EXPORT_TIMEOUT_MINUTES = int(os.environ.get("EXPORT_TIMEOUT_MINUTES", "120"))

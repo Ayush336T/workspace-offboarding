@@ -39,7 +39,10 @@ jobs:
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
           BACKUP_FOLDER_ID: ${{ secrets.BACKUP_FOLDER_ID }}
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SUSPENSION_THRESHOLD_DAYS: "45"
           DELETE_AFTER_BACKUP: ${{ github.event.inputs.dry_run == 'true' && 'false' || 'true' }}
           TEST_USER: ${{ github.event.inputs.test_user || '' }}
+          BATCH_SIZE: "20"
+          EXPORT_TIMEOUT_MINUTES: "120"
         run: python main.py
