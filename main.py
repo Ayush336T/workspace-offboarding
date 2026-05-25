@@ -465,8 +465,17 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
             failed_uploads.append(export_type)
 
     # Step 6: Close the Vault matter (set to CLOSED state for retention)
-    vault_service.matters().close(matterId=matter_id, body={}).execute()
-    print(f"  Closed Vault matter (data retained)")
+    for attempt in range(3):
+        try:
+            vault_service.matters().close(matterId=matter_id, body={}).execute()
+            print(f"  Closed Vault matter (data retained)")
+            break
+        except Exception as e:
+            if attempt < 2:
+                print(f"  Vault close retry {attempt + 1}/3: {e}")
+                time.sleep(5 * (attempt + 1))
+            else:
+                print(f"  WARNING: Could not close Vault matter: {e}")
 
     # Step 7: Transfer Drive ownership and delete user account
     # Only proceed if ALL exports were actually downloaded and uploaded to Drive
@@ -505,7 +514,16 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
     summary_path = os.path.join(tempfile.gettempdir(), "summary.json")
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
-    upload_to_drive(drive_service, folder_id, summary_path, "offboarding_summary.json")
+
+    for attempt in range(3):
+        try:
+            upload_to_drive(drive_service, folder_id, summary_path, "offboarding_summary.json")
+            break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
+            else:
+                print(f"  WARNING: Could not upload summary: {e}")
 
     return summary
 
