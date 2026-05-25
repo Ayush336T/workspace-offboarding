@@ -18,6 +18,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/admin.datatransfer",
     "https://www.googleapis.com/auth/ediscovery",
     "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/devstorage.read_only",
 ]
 
 
@@ -340,17 +341,24 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
 
     # Step 5: Download export files from Vault Cloud Storage and upload to Drive
     credentials = get_credentials()
+    uploaded_exports = []
+    failed_uploads = []
     with tempfile.TemporaryDirectory() as temp_dir:
         for export_type, export in completed_exports.items():
             try:
                 downloaded_files = download_export_files(
                     vault_service, matter_id, export["id"], temp_dir, credentials
                 )
+                if not downloaded_files:
+                    raise Exception("No files returned from Cloud Storage")
+
                 for file_info in downloaded_files:
                     upload_to_drive(
                         drive_service, folder_id, file_info["local_path"], file_info["file_name"]
                     )
                     print(f"  Uploaded {file_info['file_name']} to Drive")
+
+                uploaded_exports.append(export_type)
 
                 info_path = os.path.join(temp_dir, f"{export_type}_export_info.json")
                 with open(info_path, "w") as f:
@@ -373,17 +381,19 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
                 )
                 print(f"  Uploaded {export_type} export info to Drive")
             except Exception as e:
-                print(f"  WARNING: Failed to process {export_type} files: {e}")
+                print(f"  WARNING: Failed to download/upload {export_type} files: {e}")
+                failed_uploads.append(export_type)
 
     # Step 6: Close the Vault matter (set to CLOSED state for retention)
     vault_service.matters().close(matterId=matter_id, body={}).execute()
     print(f"  Closed Vault matter (data retained)")
 
     # Step 7: Transfer Drive ownership and delete user account
+    # Only proceed if ALL exports were actually downloaded and uploaded to Drive
     account_deleted = False
-    all_exports_passed = len(completed_exports) == len(export_types)
+    all_data_saved = len(uploaded_exports) == len(export_types) and not failed_uploads
 
-    if config.DELETE_AFTER_BACKUP and all_exports_passed:
+    if config.DELETE_AFTER_BACKUP and all_data_saved:
         try:
             transfer_drive_ownership(datatransfer_service, admin_service, user["id"])
             print(f"  Drive ownership transferred to {config.TRANSFER_TO_EMAIL}")
@@ -392,10 +402,10 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
 
         delete_user(admin_service, user_email)
         account_deleted = True
-    elif not all_exports_passed:
+    elif not all_data_saved:
         print(
-            f"  SKIPPING deletion - not all exports succeeded "
-            f"({len(completed_exports)}/{len(export_types)})"
+            f"  SKIPPING deletion - not all exports were saved to Drive "
+            f"(uploaded: {uploaded_exports}, failed: {failed_uploads})"
         )
     else:
         print(f"  [DRY RUN] Skipping deletion")
@@ -407,8 +417,8 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
         "offboarded_at": datetime.now(timezone.utc).isoformat(),
         "matter_id": matter_id,
         "backup_folder_id": folder_id,
-        "exports_completed": list(completed_exports.keys()),
-        "exports_failed": [t for t in export_types if t not in completed_exports],
+        "exports_completed": uploaded_exports,
+        "exports_failed": failed_uploads + [t for t in export_types if t not in completed_exports],
         "account_deleted": account_deleted,
     }
 
