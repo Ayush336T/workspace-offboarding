@@ -19,6 +19,7 @@ on:
 jobs:
   offboard:
     runs-on: ubuntu-latest
+    timeout-minutes: 1440
 
     steps:
       - name: Checkout code
