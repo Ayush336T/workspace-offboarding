@@ -574,8 +574,22 @@ def main():
         f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."
     )
 
+    run_start = time.time()
+    max_run_seconds = config.MAX_RUN_MINUTES * 60
+    skipped_users = []
+
     results = []
     for user in suspended_users:
+        elapsed = time.time() - run_start
+        remaining = max_run_seconds - elapsed
+        # Need at least EXPORT_TIMEOUT_MINUTES + 10 min buffer to safely process a user
+        min_required = (config.EXPORT_TIMEOUT_MINUTES + 10) * 60
+        if remaining < min_required:
+            skipped_users = [u["primaryEmail"] for u in suspended_users[len(results):]]
+            print(f"\n⏱ Time limit approaching ({int(elapsed/60)}m elapsed, {int(remaining/60)}m remaining).")
+            print(f"  Stopping early — {len(skipped_users)} user(s) deferred to next run.")
+            break
+
         try:
             summary = process_user(user, vault_service, drive_service, admin_service, datatransfer_service)
             results.append(summary)
@@ -588,13 +602,16 @@ def main():
 
     successful = len([r for r in results if "error" not in r])
     failed = len([r for r in results if "error" in r])
+    total_elapsed_min = int((time.time() - run_start) / 60)
 
     final_msg = (
-        f":checkered_flag: *Offboarding run complete*\n"
+        f":checkered_flag: *Offboarding run complete* ({total_elapsed_min}m)\n"
         f"• *Total processed:* {len(results)}\n"
         f"• *Successful:* {successful}\n"
         f"• *Failed:* {failed}"
     )
+    if skipped_users:
+        final_msg += f"\n• *Deferred to next run:* {len(skipped_users)} user(s)"
     send_slack_notification(final_msg)
 
     print("\n" + "=" * 60)

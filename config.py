@@ -36,3 +36,6 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "20"))
 
 # Vault export timeout in minutes
 EXPORT_TIMEOUT_MINUTES = int(os.environ.get("EXPORT_TIMEOUT_MINUTES", "120"))
+
+# Maximum total run time in minutes (must finish before GitHub's 6-hour hard limit)
+MAX_RUN_MINUTES = int(os.environ.get("MAX_RUN_MINUTES", "330"))

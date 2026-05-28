@@ -19,7 +19,7 @@ on:
 jobs:
   offboard:
     runs-on: ubuntu-latest
-    timeout-minutes: 1440
+    timeout-minutes: 360
 
     steps:
       - name: Checkout code
@@ -45,4 +45,5 @@ jobs:
           TEST_USER: ${{ github.event.inputs.test_user || '' }}
           BATCH_SIZE: "20"
           EXPORT_TIMEOUT_MINUTES: "120"
+          MAX_RUN_MINUTES: "330"
         run: python main.py
