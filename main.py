@@ -163,17 +163,33 @@ def create_vault_export(vault_service, user_email, matter_id, export_type):
 
 def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=None):
     """Wait for a Vault export to complete."""
+    import ssl
+    from googleapiclient.errors import HttpError
+
     if timeout_minutes is None:
         timeout_minutes = config.EXPORT_TIMEOUT_MINUTES
     deadline = time.time() + (timeout_minutes * 60)
+    consecutive_errors = 0
+    max_consecutive_errors = 5
 
     while time.time() < deadline:
-        export = (
-            vault_service.matters()
-            .exports()
-            .get(matterId=matter_id, exportId=export_id)
-            .execute()
-        )
+        try:
+            export = (
+                vault_service.matters()
+                .exports()
+                .get(matterId=matter_id, exportId=export_id)
+                .execute()
+            )
+            consecutive_errors = 0
+        except (ssl.SSLError, ConnectionError, OSError, HttpError) as e:
+            consecutive_errors += 1
+            if consecutive_errors >= max_consecutive_errors:
+                raise Exception(
+                    f"Export {export_id} status check failed {max_consecutive_errors} times consecutively: {e}"
+                )
+            print(f"  Export {export_id} status check failed (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
+            time.sleep(30 * consecutive_errors)
+            continue
 
         status = export.get("status")
         if status == "COMPLETED":
@@ -422,7 +438,10 @@ def process_user(user, vault_service, drive_service, admin_service, datatransfer
     completed_exports = {}
     for export_type, export in exports.items():
         try:
-            completed = wait_for_export(vault_service, matter_id, export["id"])
+            timeout = config.EXPORT_TIMEOUT_MINUTES
+            if export_type == "drive":
+                timeout = int(timeout * 1.5)
+            completed = wait_for_export(vault_service, matter_id, export["id"], timeout_minutes=timeout)
             completed_exports[export_type] = completed
             print(f"  {export_type} export completed")
         except Exception as e:
