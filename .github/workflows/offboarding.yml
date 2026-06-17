@@ -44,6 +44,6 @@ jobs:
           DELETE_AFTER_BACKUP: ${{ github.event.inputs.dry_run == 'true' && 'false' || 'true' }}
           TEST_USER: ${{ github.event.inputs.test_user || '' }}
           BATCH_SIZE: "20"
-          EXPORT_TIMEOUT_MINUTES: "120"
+          EXPORT_TIMEOUT_MINUTES: "300"
           MAX_RUN_MINUTES: "330"
         run: python main.py
