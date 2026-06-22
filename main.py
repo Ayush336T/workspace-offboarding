@@ -576,6 +576,16 @@ def main():
             return
         print(f"\n[TEST MODE] Only processing: {config.TEST_USER}")
 
+    if config.SKIP_USERS:
+        before = len(suspended_users)
+        suspended_users = [
+            u for u in suspended_users
+            if u["primaryEmail"].lower() not in config.SKIP_USERS
+        ]
+        removed = before - len(suspended_users)
+        if removed:
+            print(f"\nSkipping {removed} user(s) listed in SKIP_USERS: {config.SKIP_USERS}")
+
     if not suspended_users:
         print("\nNo users to process. Done.")
         send_slack_notification(

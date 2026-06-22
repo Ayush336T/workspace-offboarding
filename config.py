@@ -28,6 +28,14 @@ SLACK_WEBHOOK_URL = os.environ.get(
 # Test mode: set to a single email to only process that user
 TEST_USER = os.environ.get("TEST_USER", "")
 
+# Comma-separated list of emails to skip (e.g. users blocked by oversized Drives
+# that need manual recovery — keeps them out of the daily queue).
+SKIP_USERS = [
+    e.strip().lower()
+    for e in os.environ.get("SKIP_USERS", "").split(",")
+    if e.strip()
+]
+
 # Account to transfer Drive ownership to before deletion
 TRANSFER_TO_EMAIL = os.environ.get("TRANSFER_TO_EMAIL", "svc-super@devrev.ai")
 

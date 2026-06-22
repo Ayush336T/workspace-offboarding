@@ -43,6 +43,7 @@ jobs:
           SUSPENSION_THRESHOLD_DAYS: "45"
           DELETE_AFTER_BACKUP: ${{ github.event.inputs.dry_run == 'true' && 'false' || 'true' }}
           TEST_USER: ${{ github.event.inputs.test_user || '' }}
+          SKIP_USERS: "arush.balyan@devrev.ai"
           BATCH_SIZE: "20"
           EXPORT_TIMEOUT_MINUTES: "300"
           MAX_RUN_MINUTES: "330"
