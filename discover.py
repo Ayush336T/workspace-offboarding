@@ -7,7 +7,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 import config
-from main import get_credentials, get_suspended_users
+from main import get_credentials, get_suspended_users, send_slack_notification
 
 
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "3"))
@@ -43,6 +43,15 @@ def main():
 
     shards = chunk_list(emails, CHUNK_SIZE) if emails else []
     print(f"Produced {len(shards)} shard(s) of up to {CHUNK_SIZE} user(s) each")
+
+    if emails:
+        send_slack_notification(
+            f":rocket: *Offboarding started* — processing {len(emails)} user(s) suspended {config.SUSPENSION_THRESHOLD_DAYS}+ days across {len(shards)} shard(s)."
+        )
+    else:
+        send_slack_notification(
+            f":information_source: *Offboarding run complete* — no users to process (0 suspended {config.SUSPENSION_THRESHOLD_DAYS}+ days)."
+        )
 
     # base64-encode shard payload so GitHub's secret-masking (which
     # matches the org domain from GOOGLE_DOMAIN) doesn't redact the

@@ -617,9 +617,10 @@ def main():
             suspended_users = suspended_users[:config.BATCH_SIZE]
             print(f"Batch size: {config.BATCH_SIZE} (processing {len(suspended_users)} of {total_users})")
 
-    send_slack_notification(
-        f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."
-    )
+    if not shard_mode:
+        send_slack_notification(
+            f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."
+        )
 
     run_start = time.time()
     max_run_seconds = config.MAX_RUN_MINUTES * 60
@@ -651,15 +652,16 @@ def main():
     failed = len([r for r in results if "error" in r])
     total_elapsed_min = int((time.time() - run_start) / 60)
 
-    final_msg = (
-        f":checkered_flag: *Offboarding run complete* ({total_elapsed_min}m)\n"
-        f"• *Total processed:* {len(results)}\n"
-        f"• *Successful:* {successful}\n"
-        f"• *Failed:* {failed}"
-    )
-    if skipped_users:
-        final_msg += f"\n• *Deferred to next run:* {len(skipped_users)} user(s)"
-    send_slack_notification(final_msg)
+    if not shard_mode:
+        final_msg = (
+            f":checkered_flag: *Offboarding run complete* ({total_elapsed_min}m)\n"
+            f"• *Total processed:* {len(results)}\n"
+            f"• *Successful:* {successful}\n"
+            f"• *Failed:* {failed}"
+        )
+        if skipped_users:
+            final_msg += f"\n• *Deferred to next run:* {len(skipped_users)} user(s)"
+        send_slack_notification(final_msg)
 
     print("\n" + "=" * 60)
     print("SUMMARY")
