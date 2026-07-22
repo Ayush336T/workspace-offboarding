@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import sys
@@ -43,10 +44,17 @@ def main():
     shards = chunk_list(emails, CHUNK_SIZE) if emails else []
     print(f"Produced {len(shards)} shard(s) of up to {CHUNK_SIZE} user(s) each")
 
+    # base64-encode shard payload so GitHub's secret-masking (which
+    # matches the org domain from GOOGLE_DOMAIN) doesn't redact the
+    # emails and break matrix expansion.
+    shards_b64 = base64.b64encode(json.dumps(shards).encode()).decode()
+    shard_indices = list(range(len(shards)))
+
     output_path = os.environ.get("GITHUB_OUTPUT")
     if output_path:
         with open(output_path, "a") as f:
-            f.write(f"shards={json.dumps(shards)}\n")
+            f.write(f"shards_b64={shards_b64}\n")
+            f.write(f"shard_indices={json.dumps(shard_indices)}\n")
             f.write(f"has_work={'true' if shards else 'false'}\n")
             f.write(f"total_users={len(emails)}\n")
     else:

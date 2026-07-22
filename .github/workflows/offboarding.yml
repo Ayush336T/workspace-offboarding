@@ -21,7 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      shards: ${{ steps.plan.outputs.shards }}
+      shards_b64: ${{ steps.plan.outputs.shards_b64 }}
+      shard_indices: ${{ steps.plan.outputs.shard_indices }}
       has_work: ${{ steps.plan.outputs.has_work }}
       total_users: ${{ steps.plan.outputs.total_users }}
     steps:
@@ -58,7 +59,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        shard: ${{ fromJson(needs.discover.outputs.shards) }}
+        shard_index: ${{ fromJson(needs.discover.outputs.shard_indices) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -70,6 +71,14 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Decode shard emails
+        id: decode
+        env:
+          SHARDS_B64: ${{ needs.discover.outputs.shards_b64 }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          echo "shard_users=$(echo "$SHARDS_B64" | base64 --decode | python -c 'import json,os,sys; print(json.dumps(json.load(sys.stdin)[int(os.environ["SHARD_INDEX"])]))')" >> "$GITHUB_OUTPUT"
 
       - name: Run offboarding shard
         env:
@@ -84,5 +93,5 @@ jobs:
           BATCH_SIZE: "0"
           EXPORT_TIMEOUT_MINUTES: "180"
           MAX_RUN_MINUTES: "300"
-          SHARD_USERS: ${{ toJson(matrix.shard) }}
+          SHARD_USERS: ${{ steps.decode.outputs.shard_users }}
         run: python main.py
