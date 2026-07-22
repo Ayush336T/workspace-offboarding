@@ -17,10 +17,13 @@ on:
         default: false
 
 jobs:
-  offboard:
+  discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+    timeout-minutes: 15
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+      total_users: ${{ steps.plan.outputs.total_users }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,7 +36,42 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run offboarding script
+      - name: Discover suspended users and build shards
+        id: plan
+        env:
+          GOOGLE_DOMAIN: ${{ secrets.GOOGLE_DOMAIN }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SUSPENSION_THRESHOLD_DAYS: "45"
+          SKIP_USERS: "arush.balyan@devrev.ai,devanshu.shah@devrev.ai,erik.jarlsson@devrev.ai,feng.gao@devrev.ai"
+          BATCH_SIZE: "20"
+          CHUNK_SIZE: "3"
+          TEST_USER: ${{ github.event.inputs.test_user || '' }}
+        run: python discover.py
+
+  offboard:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: ${{ fromJson(needs.discover.outputs.shards) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run offboarding shard
         env:
           GOOGLE_DOMAIN: ${{ secrets.GOOGLE_DOMAIN }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
@@ -42,9 +80,9 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SUSPENSION_THRESHOLD_DAYS: "45"
           DELETE_AFTER_BACKUP: ${{ github.event.inputs.dry_run == 'true' && 'false' || 'true' }}
-          TEST_USER: ${{ github.event.inputs.test_user || '' }}
           SKIP_USERS: "arush.balyan@devrev.ai,devanshu.shah@devrev.ai,erik.jarlsson@devrev.ai,feng.gao@devrev.ai"
-          BATCH_SIZE: "20"
+          BATCH_SIZE: "0"
           EXPORT_TIMEOUT_MINUTES: "180"
-          MAX_RUN_MINUTES: "330"
+          MAX_RUN_MINUTES: "300"
+          SHARD_USERS: ${{ toJson(matrix.shard) }}
         run: python main.py

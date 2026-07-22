@@ -565,26 +565,44 @@ def main():
     vault_service = build("vault", "v1", credentials=credentials)
     drive_service = build("drive", "v3", credentials=credentials)
 
-    print("\nSearching for suspended users...")
-    suspended_users = get_suspended_users(admin_service)
-    print(f"Found {len(suspended_users)} users suspended for 45+ days")
+    shard_users_raw = os.environ.get("SHARD_USERS", "").strip()
+    shard_mode = bool(shard_users_raw)
 
-    if config.TEST_USER:
-        suspended_users = [u for u in suspended_users if u["primaryEmail"] == config.TEST_USER]
-        if not suspended_users:
-            print(f"\nTEST_USER '{config.TEST_USER}' not found in suspended users list.")
-            return
-        print(f"\n[TEST MODE] Only processing: {config.TEST_USER}")
-
-    if config.SKIP_USERS:
-        before = len(suspended_users)
+    if shard_mode:
+        try:
+            shard_emails = json.loads(shard_users_raw)
+        except json.JSONDecodeError:
+            shard_emails = [e.strip() for e in shard_users_raw.split(",") if e.strip()]
+        shard_emails_lower = {e.lower() for e in shard_emails}
+        print(f"\n[SHARD MODE] Processing {len(shard_emails)} user(s): {shard_emails}")
+        suspended_users = get_suspended_users(admin_service)
         suspended_users = [
-            u for u in suspended_users
-            if u["primaryEmail"].lower() not in config.SKIP_USERS
+            u for u in suspended_users if u["primaryEmail"].lower() in shard_emails_lower
         ]
-        removed = before - len(suspended_users)
-        if removed:
-            print(f"\nSkipping {removed} user(s) listed in SKIP_USERS: {config.SKIP_USERS}")
+        missing = shard_emails_lower - {u["primaryEmail"].lower() for u in suspended_users}
+        if missing:
+            print(f"WARNING: {len(missing)} shard user(s) not found in suspended list: {missing}")
+    else:
+        print("\nSearching for suspended users...")
+        suspended_users = get_suspended_users(admin_service)
+        print(f"Found {len(suspended_users)} users suspended for 45+ days")
+
+        if config.TEST_USER:
+            suspended_users = [u for u in suspended_users if u["primaryEmail"] == config.TEST_USER]
+            if not suspended_users:
+                print(f"\nTEST_USER '{config.TEST_USER}' not found in suspended users list.")
+                return
+            print(f"\n[TEST MODE] Only processing: {config.TEST_USER}")
+
+        if config.SKIP_USERS:
+            before = len(suspended_users)
+            suspended_users = [
+                u for u in suspended_users
+                if u["primaryEmail"].lower() not in config.SKIP_USERS
+            ]
+            removed = before - len(suspended_users)
+            if removed:
+                print(f"\nSkipping {removed} user(s) listed in SKIP_USERS: {config.SKIP_USERS}")
 
     if not suspended_users:
         print("\nNo users to process. Done.")
@@ -593,11 +611,11 @@ def main():
         )
         return
 
-    # Apply batch limit
-    total_users = len(suspended_users)
-    if config.BATCH_SIZE > 0 and not config.TEST_USER:
-        suspended_users = suspended_users[:config.BATCH_SIZE]
-        print(f"Batch size: {config.BATCH_SIZE} (processing {len(suspended_users)} of {total_users})")
+    if not shard_mode:
+        total_users = len(suspended_users)
+        if config.BATCH_SIZE > 0 and not config.TEST_USER:
+            suspended_users = suspended_users[:config.BATCH_SIZE]
+            print(f"Batch size: {config.BATCH_SIZE} (processing {len(suspended_users)} of {total_users})")
 
     send_slack_notification(
         f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."
