@@ -122,7 +122,14 @@ def get_suspended_users(admin_service):
 
 
 def create_vault_export(vault_service, user_email, matter_id, export_type):
-    """Create a Vault export for a specific user and data type."""
+    """Create a Vault export for a specific user and data type.
+
+    Vault's export-writes quota is 20/min/project. If we hit 429, back off
+    and retry — the daily job routinely bursts past the limit and pre-fix
+    behavior was to give up permanently on the first 429.
+    """
+    from googleapiclient.errors import HttpError
+
     corpus_map = {
         "mail": "MAIL",
         "drive": "DRIVE",
@@ -151,14 +158,25 @@ def create_vault_export(vault_service, user_email, matter_id, export_type):
             "includeAccessInfo": False
         }
 
-    export = (
-        vault_service.matters()
-        .exports()
-        .create(matterId=matter_id, body=export_body)
-        .execute()
-    )
-
-    return export
+    max_attempts = 6
+    for attempt in range(max_attempts):
+        try:
+            return (
+                vault_service.matters()
+                .exports()
+                .create(matterId=matter_id, body=export_body)
+                .execute()
+            )
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            is_rate_limit = status in (429, 403) and (
+                b"RATE_LIMIT_EXCEEDED" in (e.content or b"") or b"quotaExceeded" in (e.content or b"")
+            )
+            if not is_rate_limit or attempt == max_attempts - 1:
+                raise
+            backoff = min(120, 15 * (2 ** attempt))
+            print(f"    Vault export create rate-limited (attempt {attempt + 1}/{max_attempts}), sleeping {backoff}s")
+            time.sleep(backoff)
 
 
 def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=None):

@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: 330
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 2
       matrix:
         shard_index: ${{ fromJson(needs.discover.outputs.shard_indices) }}
     steps:
