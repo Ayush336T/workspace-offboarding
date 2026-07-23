@@ -122,7 +122,14 @@ def get_suspended_users(admin_service):
 
 
 def create_vault_export(vault_service, user_email, matter_id, export_type):
-    """Create a Vault export for a specific user and data type."""
+    """Create a Vault export for a specific user and data type.
+
+    Vault's export-writes quota is 20/min/project. If we hit 429, back off
+    and retry — the daily job routinely bursts past the limit and pre-fix
+    behavior was to give up permanently on the first 429.
+    """
+    from googleapiclient.errors import HttpError
+
     corpus_map = {
         "mail": "MAIL",
         "drive": "DRIVE",
@@ -151,14 +158,25 @@ def create_vault_export(vault_service, user_email, matter_id, export_type):
             "includeAccessInfo": False
         }
 
-    export = (
-        vault_service.matters()
-        .exports()
-        .create(matterId=matter_id, body=export_body)
-        .execute()
-    )
-
-    return export
+    max_attempts = 6
+    for attempt in range(max_attempts):
+        try:
+            return (
+                vault_service.matters()
+                .exports()
+                .create(matterId=matter_id, body=export_body)
+                .execute()
+            )
+        except HttpError as e:
+            status = getattr(e.resp, "status", None)
+            is_rate_limit = status in (429, 403) and (
+                b"RATE_LIMIT_EXCEEDED" in (e.content or b"") or b"quotaExceeded" in (e.content or b"")
+            )
+            if not is_rate_limit or attempt == max_attempts - 1:
+                raise
+            backoff = min(120, 15 * (2 ** attempt))
+            print(f"    Vault export create rate-limited (attempt {attempt + 1}/{max_attempts}), sleeping {backoff}s")
+            time.sleep(backoff)
 
 
 def wait_for_export(vault_service, matter_id, export_id, timeout_minutes=None):
@@ -565,26 +583,44 @@ def main():
     vault_service = build("vault", "v1", credentials=credentials)
     drive_service = build("drive", "v3", credentials=credentials)
 
-    print("\nSearching for suspended users...")
-    suspended_users = get_suspended_users(admin_service)
-    print(f"Found {len(suspended_users)} users suspended for 45+ days")
+    shard_users_raw = os.environ.get("SHARD_USERS", "").strip()
+    shard_mode = bool(shard_users_raw)
 
-    if config.TEST_USER:
-        suspended_users = [u for u in suspended_users if u["primaryEmail"] == config.TEST_USER]
-        if not suspended_users:
-            print(f"\nTEST_USER '{config.TEST_USER}' not found in suspended users list.")
-            return
-        print(f"\n[TEST MODE] Only processing: {config.TEST_USER}")
-
-    if config.SKIP_USERS:
-        before = len(suspended_users)
+    if shard_mode:
+        try:
+            shard_emails = json.loads(shard_users_raw)
+        except json.JSONDecodeError:
+            shard_emails = [e.strip() for e in shard_users_raw.split(",") if e.strip()]
+        shard_emails_lower = {e.lower() for e in shard_emails}
+        print(f"\n[SHARD MODE] Processing {len(shard_emails)} user(s): {shard_emails}")
+        suspended_users = get_suspended_users(admin_service)
         suspended_users = [
-            u for u in suspended_users
-            if u["primaryEmail"].lower() not in config.SKIP_USERS
+            u for u in suspended_users if u["primaryEmail"].lower() in shard_emails_lower
         ]
-        removed = before - len(suspended_users)
-        if removed:
-            print(f"\nSkipping {removed} user(s) listed in SKIP_USERS: {config.SKIP_USERS}")
+        missing = shard_emails_lower - {u["primaryEmail"].lower() for u in suspended_users}
+        if missing:
+            print(f"WARNING: {len(missing)} shard user(s) not found in suspended list: {missing}")
+    else:
+        print("\nSearching for suspended users...")
+        suspended_users = get_suspended_users(admin_service)
+        print(f"Found {len(suspended_users)} users suspended for 45+ days")
+
+        if config.TEST_USER:
+            suspended_users = [u for u in suspended_users if u["primaryEmail"] == config.TEST_USER]
+            if not suspended_users:
+                print(f"\nTEST_USER '{config.TEST_USER}' not found in suspended users list.")
+                return
+            print(f"\n[TEST MODE] Only processing: {config.TEST_USER}")
+
+        if config.SKIP_USERS:
+            before = len(suspended_users)
+            suspended_users = [
+                u for u in suspended_users
+                if u["primaryEmail"].lower() not in config.SKIP_USERS
+            ]
+            removed = before - len(suspended_users)
+            if removed:
+                print(f"\nSkipping {removed} user(s) listed in SKIP_USERS: {config.SKIP_USERS}")
 
     if not suspended_users:
         print("\nNo users to process. Done.")
@@ -593,15 +629,16 @@ def main():
         )
         return
 
-    # Apply batch limit
-    total_users = len(suspended_users)
-    if config.BATCH_SIZE > 0 and not config.TEST_USER:
-        suspended_users = suspended_users[:config.BATCH_SIZE]
-        print(f"Batch size: {config.BATCH_SIZE} (processing {len(suspended_users)} of {total_users})")
+    if not shard_mode:
+        total_users = len(suspended_users)
+        if config.BATCH_SIZE > 0 and not config.TEST_USER:
+            suspended_users = suspended_users[:config.BATCH_SIZE]
+            print(f"Batch size: {config.BATCH_SIZE} (processing {len(suspended_users)} of {total_users})")
 
-    send_slack_notification(
-        f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."
-    )
+    if not shard_mode:
+        send_slack_notification(
+            f":rocket: *Offboarding started* — processing {len(suspended_users)} user(s) suspended 45+ days."
+        )
 
     run_start = time.time()
     max_run_seconds = config.MAX_RUN_MINUTES * 60
@@ -633,15 +670,16 @@ def main():
     failed = len([r for r in results if "error" in r])
     total_elapsed_min = int((time.time() - run_start) / 60)
 
-    final_msg = (
-        f":checkered_flag: *Offboarding run complete* ({total_elapsed_min}m)\n"
-        f"• *Total processed:* {len(results)}\n"
-        f"• *Successful:* {successful}\n"
-        f"• *Failed:* {failed}"
-    )
-    if skipped_users:
-        final_msg += f"\n• *Deferred to next run:* {len(skipped_users)} user(s)"
-    send_slack_notification(final_msg)
+    if not shard_mode:
+        final_msg = (
+            f":checkered_flag: *Offboarding run complete* ({total_elapsed_min}m)\n"
+            f"• *Total processed:* {len(results)}\n"
+            f"• *Successful:* {successful}\n"
+            f"• *Failed:* {failed}"
+        )
+        if skipped_users:
+            final_msg += f"\n• *Deferred to next run:* {len(skipped_users)} user(s)"
+        send_slack_notification(final_msg)
 
     print("\n" + "=" * 60)
     print("SUMMARY")

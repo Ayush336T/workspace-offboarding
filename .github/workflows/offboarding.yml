@@ -17,10 +17,14 @@ on:
         default: false
 
 jobs:
-  offboard:
+  discover:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+    timeout-minutes: 15
+    outputs:
+      shards_b64: ${{ steps.plan.outputs.shards_b64 }}
+      shard_indices: ${{ steps.plan.outputs.shard_indices }}
+      has_work: ${{ steps.plan.outputs.has_work }}
+      total_users: ${{ steps.plan.outputs.total_users }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -33,7 +37,51 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run offboarding script
+      - name: Discover suspended users and build shards
+        id: plan
+        env:
+          GOOGLE_DOMAIN: ${{ secrets.GOOGLE_DOMAIN }}
+          ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SUSPENSION_THRESHOLD_DAYS: "45"
+          SKIP_USERS: "arush.balyan@devrev.ai,devanshu.shah@devrev.ai,erik.jarlsson@devrev.ai,feng.gao@devrev.ai"
+          BATCH_SIZE: "20"
+          CHUNK_SIZE: "3"
+          TEST_USER: ${{ github.event.inputs.test_user || '' }}
+        run: python discover.py
+
+  offboard:
+    needs: discover
+    if: needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard_index: ${{ fromJson(needs.discover.outputs.shard_indices) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Decode shard emails
+        id: decode
+        env:
+          SHARDS_B64: ${{ needs.discover.outputs.shards_b64 }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+        run: |
+          echo "shard_users=$(echo "$SHARDS_B64" | base64 --decode | python -c 'import json,os,sys; print(json.dumps(json.load(sys.stdin)[int(os.environ["SHARD_INDEX"])]))')" >> "$GITHUB_OUTPUT"
+
+      - name: Run offboarding shard
         env:
           GOOGLE_DOMAIN: ${{ secrets.GOOGLE_DOMAIN }}
           ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
@@ -42,9 +90,33 @@ jobs:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           SUSPENSION_THRESHOLD_DAYS: "45"
           DELETE_AFTER_BACKUP: ${{ github.event.inputs.dry_run == 'true' && 'false' || 'true' }}
-          TEST_USER: ${{ github.event.inputs.test_user || '' }}
           SKIP_USERS: "arush.balyan@devrev.ai,devanshu.shah@devrev.ai,erik.jarlsson@devrev.ai,feng.gao@devrev.ai"
-          BATCH_SIZE: "20"
+          BATCH_SIZE: "0"
           EXPORT_TIMEOUT_MINUTES: "180"
-          MAX_RUN_MINUTES: "330"
+          MAX_RUN_MINUTES: "300"
+          SHARD_USERS: ${{ steps.decode.outputs.shard_users }}
         run: python main.py
+
+  summarize:
+    needs: [discover, offboard]
+    if: always() && needs.discover.outputs.has_work == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Post run summary to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TOTAL_USERS: ${{ needs.discover.outputs.total_users }}
+          OFFBOARD_RESULT: ${{ needs.offboard.result }}
+        run: |
+          if [ "$OFFBOARD_RESULT" = "success" ]; then
+            EMOJI=":checkered_flag:"
+            STATUS="all shards succeeded"
+          else
+            EMOJI=":warning:"
+            STATUS="offboard result: $OFFBOARD_RESULT (some shards may have failed — check per-user messages above)"
+          fi
+          MSG="$EMOJI *Offboarding run complete* — $TOTAL_USERS user(s) attempted, $STATUS."
+          curl -s -X POST -H 'Content-Type: application/json' \
+            --data "{\"text\": $(printf '%s' "$MSG" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
+            "$SLACK_WEBHOOK_URL"
